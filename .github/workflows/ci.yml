@@ -1,0 +1,36 @@
+# Mirror of the Jenkins pipeline on GitHub Actions (allowed as an alternative by the assignment).
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: ["3.11", "3.12"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+      - run: pip install -r requirements-dev.txt -e .
+      - run: flake8 src tests
+      - run: pytest --junitxml=reports/junit.xml --cov=mas_marketing --cov-report=term
+
+  docker:
+    needs: test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: docker build --target test -t mas-marketing:test .
+      - run: docker build -t mas-marketing:${{ github.sha }} .
+      - run: |
+          mkdir -p results && chmod 777 results
+          docker run --rm -v "$PWD/results:/app/results" mas-marketing:${{ github.sha }} \
+            --scenario S2 --runs 5 --agents 200 --steps 20 --out /app/results
+          cat results/summary.json
