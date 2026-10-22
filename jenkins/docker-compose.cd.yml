@@ -1,0 +1,11 @@
+# Override for the optional CD stage: attaches Jenkins to Minikube's Docker network
+# and mounts the kubeconfig produced by minikube-kubeconfig.sh.
+services:
+  jenkins:
+    volumes:
+      - ./kubeconfig:/root/.kube/config:ro
+    networks: [default, minikube]
+
+networks:
+  minikube:
+    external: true

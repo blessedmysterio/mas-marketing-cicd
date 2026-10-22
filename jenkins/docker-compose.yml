@@ -1,0 +1,18 @@
+# Local Jenkins:  cd jenkins && docker compose up -d --build   ->  http://localhost:8080
+services:
+  jenkins:
+    build: .
+    image: mas-jenkins:lts
+    container_name: mas-jenkins
+    user: root
+    ports:
+      - "8080:8080"
+    env_file: .env
+    volumes:
+      - jenkins_home:/var/jenkins_home
+      - /var/run/docker.sock:/var/run/docker.sock   # Docker-outside-of-Docker for image builds
+    # Optional CD to Minikube: see docker-compose.cd.yml
+    restart: unless-stopped
+
+volumes:
+  jenkins_home:
