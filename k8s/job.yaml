@@ -1,0 +1,37 @@
+# Batch simulation run. The pipeline substitutes IMAGE_PLACEHOLDER / RUNS_PLACEHOLDER.
+# Manual use:  sed "s|IMAGE_PLACEHOLDER|<user>/mas-marketing:latest|;s|RUNS_PLACEHOLDER|30|" k8s/job.yaml | kubectl apply -f -
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: mas-simulation
+  namespace: mas-research
+  labels:
+    app.kubernetes.io/name: mas-marketing
+spec:
+  backoffLimit: 1
+  ttlSecondsAfterFinished: 3600
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: mas-marketing
+    spec:
+      restartPolicy: Never
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        fsGroup: 10001
+      containers:
+        - name: simulation
+          image: IMAGE_PLACEHOLDER
+          imagePullPolicy: IfNotPresent
+          args: ["--runs", "RUNS_PLACEHOLDER", "--out", "/app/results"]
+          resources:
+            requests: { cpu: "250m", memory: "256Mi" }
+            limits:   { cpu: "1",    memory: "512Mi" }
+          volumeMounts:
+            - name: results
+              mountPath: /app/results
+      volumes:
+        - name: results
+          persistentVolumeClaim:
+            claimName: mas-results
