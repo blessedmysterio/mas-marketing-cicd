@@ -89,10 +89,15 @@ pipeline {
 
         stage('Smoke test container') {
             steps {
+                // No bind mount: Jenkins talks to the host Docker daemon, which cannot see
+                // the Jenkins workspace path. Results are copied out with `docker cp`.
                 sh '''
-                    rm -rf results && mkdir -p results && chmod 777 results
-                    docker run --rm -v "$WORKSPACE/results:/app/results" "$IMAGE_NAME:$IMAGE_TAG" \
+                    docker rm -f mas-smoke 2>/dev/null || true
+                    docker run --name mas-smoke "$IMAGE_NAME:$IMAGE_TAG" \
                         --scenario S2 --runs 5 --agents 200 --steps 20 --out /app/results
+                    rm -rf results
+                    docker cp mas-smoke:/app/results ./results
+                    docker rm -v mas-smoke
                     test -s results/summary.json
                     cat results/summary.json
                 '''
