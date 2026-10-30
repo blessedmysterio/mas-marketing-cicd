@@ -1,36 +1,119 @@
-# Mirror of the Jenkins pipeline on GitHub Actions (allowed as an alternative by the assignment).
-name: CI
+# CI/CD for the MAS marketing simulation on GitHub Actions.
+# Runs on every push / pull request:
+#   test   -> lint + unit tests on Python 3.11-3.13 (JUnit + coverage)
+#   docker -> multi-stage build (tests inside the image), smoke test, optional push to Docker Hub
+#   deploy -> CD: runs the simulation as a Kubernetes Job on Minikube inside the runner (bonus)
+name: CI/CD
 
 on:
   push:
     branches: [main]
   pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  IMAGE: mas-marketing
 
 jobs:
   test:
+    name: Lint & unit tests (py${{ matrix.python-version }})
     runs-on: ubuntu-latest
     strategy:
+      fail-fast: false
       matrix:
-        python-version: ["3.11", "3.12"]
+        python-version: ["3.11", "3.12", "3.13"]
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.python-version }}
           cache: pip
-      - run: pip install -r requirements-dev.txt -e .
-      - run: flake8 src tests
-      - run: pytest --junitxml=reports/junit.xml --cov=mas_marketing --cov-report=term
+      - name: Install
+        run: pip install -r requirements-dev.txt -e .
+      - name: Lint (flake8)
+        run: flake8 src tests
+      - name: Unit tests (pytest)
+        run: |
+          mkdir -p reports
+          pytest --junitxml=reports/junit.xml --cov=mas_marketing \
+                 --cov-report=term --cov-report=xml:reports/coverage.xml | tee reports/pytest.txt
+      - name: Test summary
+        if: always()
+        run: |
+          echo "### Tests on Python ${{ matrix.python-version }}" >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          sed -n '/coverage:/,$p' reports/pytest.txt >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: test-reports-py${{ matrix.python-version }}
+          path: reports/
 
   docker:
+    name: Docker build & smoke test
     needs: test
+    runs-on: ubuntu-latest
+    env:
+      DOCKERHUB_USER: ${{ secrets.DOCKERHUB_USER }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Image tag
+        run: echo "TAG=${{ github.run_number }}-${GITHUB_SHA::7}" >> "$GITHUB_ENV"
+      - name: Build test stage (runs pytest inside the image)
+        run: docker build --target test -t $IMAGE:test .
+      - name: Build runtime image
+        run: |
+          docker build --target runtime -t $IMAGE:$TAG -t $IMAGE:latest .
+          docker image ls $IMAGE
+      - name: Smoke test container
+        run: |
+          docker run --name smoke $IMAGE:$TAG --scenario S1 S2 S3 --runs 10 --out /app/results
+          docker cp smoke:/app/results ./results && docker rm smoke
+          test -s results/summary.json
+          echo "### Simulation results (smoke test, 10 runs)" >> "$GITHUB_STEP_SUMMARY"
+          echo '```json' >> "$GITHUB_STEP_SUMMARY"; cat results/summary.json >> "$GITHUB_STEP_SUMMARY"; echo '```' >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: simulation-results
+          path: results/
+      - name: Push to Docker Hub (only if secrets are set)
+        if: github.event_name == 'push' && env.DOCKERHUB_USER != ''
+        run: |
+          echo "${{ secrets.DOCKERHUB_TOKEN }}" | docker login -u "$DOCKERHUB_USER" --password-stdin
+          for t in $TAG latest; do
+            docker tag $IMAGE:$t $DOCKERHUB_USER/$IMAGE:$t
+            docker push $DOCKERHUB_USER/$IMAGE:$t
+          done
+          docker logout
+
+  deploy:
+    name: Deploy to Kubernetes (Minikube)
+    needs: docker
+    if: github.event_name != 'pull_request'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - run: docker build --target test -t mas-marketing:test .
-      - run: docker build -t mas-marketing:${{ github.sha }} .
-      - run: |
-          mkdir -p results && chmod 777 results
-          docker run --rm -v "$PWD/results:/app/results" mas-marketing:${{ github.sha }} \
-            --scenario S2 --runs 5 --agents 200 --steps 20 --out /app/results
-          cat results/summary.json
+      - name: Start Minikube
+        uses: medyagh/setup-minikube@latest
+      - name: Build image inside Minikube
+        run: |
+          eval $(minikube docker-env)
+          docker build --target runtime -t $IMAGE:${{ github.run_number }} .
+      - name: Apply manifests
+        run: |
+          kubectl apply -f k8s/namespace.yaml -f k8s/pvc.yaml
+          sed -e "s|IMAGE_PLACEHOLDER|$IMAGE:${{ github.run_number }}|" \
+              -e "s|RUNS_PLACEHOLDER|30|" k8s/job.yaml | kubectl apply -f -
+      - name: Wait for the simulation Job
+        run: kubectl -n mas-research wait --for=condition=complete job/mas-simulation --timeout=600s
+      - name: Show result
+        if: always()
+        run: |
+          kubectl -n mas-research get jobs,pods,pvc
+          kubectl -n mas-research logs job/mas-simulation | tee k8s-log.txt
+          echo "### Kubernetes Job output (30 paired runs)" >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"; cat k8s-log.txt >> "$GITHUB_STEP_SUMMARY"; echo '```' >> "$GITHUB_STEP_SUMMARY"
