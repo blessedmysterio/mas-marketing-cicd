@@ -99,10 +99,13 @@ jobs:
       - uses: actions/checkout@v4
       - name: Start Minikube
         uses: medyagh/setup-minikube@latest
-      - name: Build image inside Minikube
+      # Build with the runner's Docker, then copy the image into Minikube.
+      # (`minikube docker-env` does not work when Minikube uses the containerd runtime.)
+      - name: Build image and load it into Minikube
         run: |
-          eval $(minikube docker-env)
           docker build --target runtime -t $IMAGE:${{ github.run_number }} .
+          minikube image load $IMAGE:${{ github.run_number }}
+          minikube image ls | grep $IMAGE
       - name: Apply manifests
         run: |
           kubectl apply -f k8s/namespace.yaml -f k8s/pvc.yaml
